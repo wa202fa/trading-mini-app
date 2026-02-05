@@ -22,6 +22,7 @@ PERIOD_OPTIONS = {
     "max": "max",
 }
 
+
 # --------------------------
 # دوال مساعدة
 # --------------------------
@@ -35,11 +36,13 @@ def to_tadawul_symbol(symbol: str) -> str:
         return f"{s}.SR"
     return s
 
+
 def normalize_symbol(symbol: str, market: str) -> str:
     s = str(symbol).strip().upper()
     if market == "سعودي (تداول)":
         return to_tadawul_symbol(s)
     return s
+
 
 def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
@@ -51,12 +54,14 @@ def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+
 def _flatten_columns_if_multiindex(df: pd.DataFrame) -> pd.DataFrame:
     # بعض الأسواق (مثل السعودي) ترجع أعمدة MultiIndex: ('Close','1120.SR')
     if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
         df = df.copy()
         df.columns = df.columns.get_level_values(0)
     return df
+
 
 def analyze_symbol(symbol: str, period: str = "6mo"):
     df = yf.download(symbol, period=period, progress=False)
@@ -75,9 +80,15 @@ def analyze_symbol(symbol: str, period: str = "6mo"):
     df["RSI14"] = calc_rsi(close, 14)
 
     last_close = float(close.dropna().iloc[-1])
-    last_ma20 = float(df["MA20"].dropna().iloc[-1]) if df["MA20"].dropna().shape[0] else None
-    last_ma50 = float(df["MA50"].dropna().iloc[-1]) if df["MA50"].dropna().shape[0] else None
-    last_rsi = float(df["RSI14"].dropna().iloc[-1]) if df["RSI14"].dropna().shape[0] else None
+    last_ma20 = (
+        float(df["MA20"].dropna().iloc[-1]) if df["MA20"].dropna().shape[0] else None
+    )
+    last_ma50 = (
+        float(df["MA50"].dropna().iloc[-1]) if df["MA50"].dropna().shape[0] else None
+    )
+    last_rsi = (
+        float(df["RSI14"].dropna().iloc[-1]) if df["RSI14"].dropna().shape[0] else None
+    )
 
     trend = "غير واضح"
     if last_ma20 is not None and last_ma50 is not None:
@@ -106,16 +117,20 @@ def analyze_symbol(symbol: str, period: str = "6mo"):
     }
     return df, summary
 
+
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=True, sheet_name="data")
     return output.getvalue()
 
+
 # --------------------------
 # واجهة التطبيق
 # --------------------------
-tab1, tab2, tab3 = st.tabs(["تحليل سهم واحد", "فحص قائمة أسهم", "Excel + فحص قائمة أسهم"])
+tab1, tab2, tab3 = st.tabs(
+    ["تحليل سهم واحد", "فحص قائمة أسهم", "Excel + فحص قائمة أسهم"]
+)
 
 # ============== تبويب 1: تحليل سهم واحد ==============
 with tab1:
@@ -151,9 +166,16 @@ with tab1:
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("آخر إغلاق", f"{summary['آخر إغلاق']:.2f}")
-            c2.metric("RSI14", f"{summary['RSI14']:.2f}" if summary["RSI14"] is not None else "—")
-            c3.metric("MA20", f"{summary['MA20']:.2f}" if summary["MA20"] is not None else "—")
-            c4.metric("MA50", f"{summary['MA50']:.2f}" if summary["MA50"] is not None else "—")
+            c2.metric(
+                "RSI14",
+                f"{summary['RSI14']:.2f}" if summary["RSI14"] is not None else "—",
+            )
+            c3.metric(
+                "MA20", f"{summary['MA20']:.2f}" if summary["MA20"] is not None else "—"
+            )
+            c4.metric(
+                "MA50", f"{summary['MA50']:.2f}" if summary["MA50"] is not None else "—"
+            )
 
             st.info(
                 f"الاتجاه: *{summary['الاتجاه']}* | "
@@ -181,7 +203,9 @@ with tab1:
 # ============== تبويب 2: فحص قائمة أسهم ==============
 with tab2:
     st.write("اكتب قائمة رموز (كل رمز في سطر).")
-    market2 = st.selectbox("اختر السوق (للقائمة)", ["أمريكي", "سعودي (تداول)"], index=0, key="m2")
+    market2 = st.selectbox(
+        "اختر السوق (للقائمة)", ["أمريكي", "سعودي (تداول)"], index=0, key="m2"
+    )
 
     symbols_text = st.text_area(
         "رموز الأسهم",
@@ -189,7 +213,9 @@ with tab2:
         height=140,
     )
 
-    period_label2 = st.selectbox("المدة", list(PERIOD_OPTIONS.keys()), index=2, key="p2")
+    period_label2 = st.selectbox(
+        "المدة", list(PERIOD_OPTIONS.keys()), index=2, key="p2"
+    )
     period2 = PERIOD_OPTIONS[period_label2]
     run2 = st.button("افحص القائمة", type="primary", key="run2")
 
@@ -204,14 +230,20 @@ with tab2:
                 if df is None:
                     rows.append({"الرمز": sym, "الحالة": "فشل", "سبب": summary})
                 else:
-                    rows.append({
-                        "الرمز": sym,
-                        "الحالة": "تم",
-                        "آخر إغلاق": round(summary["آخر إغلاق"], 2),
-                        "RSI14": round(summary["RSI14"], 2) if summary["RSI14"] is not None else None,
-                        "الاتجاه": summary["الاتجاه"],
-                        "حالة RSI": summary["حالة RSI"],
-                    })
+                    rows.append(
+                        {
+                            "الرمز": sym,
+                            "الحالة": "تم",
+                            "آخر إغلاق": round(summary["آخر إغلاق"], 2),
+                            "RSI14": (
+                                round(summary["RSI14"], 2)
+                                if summary["RSI14"] is not None
+                                else None
+                            ),
+                            "الاتجاه": summary["الاتجاه"],
+                            "حالة RSI": summary["حالة RSI"],
+                        }
+                    )
 
         result_df = pd.DataFrame(rows)
         st.dataframe(result_df, use_container_width=True)
@@ -219,10 +251,14 @@ with tab2:
 # ============== تبويب 3: Excel + فحص ==============
 with tab3:
     st.write("ارفع ملف Excel فيه عمود اسمه: ⁠ symbol ⁠ (رمز السهم).")
-    market3 = st.selectbox("اختر السوق (لملف Excel)", ["أمريكي", "سعودي (تداول)"], index=0, key="m3")
+    market3 = st.selectbox(
+        "اختر السوق (لملف Excel)", ["أمريكي", "سعودي (تداول)"], index=0, key="m3"
+    )
 
     upload = st.file_uploader("ارفع ملف Excel", type=["xlsx"])
-    period_label3 = st.selectbox("المدة", list(PERIOD_OPTIONS.keys()), index=2, key="p3")
+    period_label3 = st.selectbox(
+        "المدة", list(PERIOD_OPTIONS.keys()), index=2, key="p3"
+    )
     period3 = PERIOD_OPTIONS[period_label3]
     run3 = st.button("حلّل من ملف Excel", type="primary", key="run3")
 
@@ -241,23 +277,33 @@ with tab3:
             st.error("لازم يكون فيه عمود باسم: symbol")
             st.stop()
 
-        symbols = [normalize_symbol(s, market3) for s in in_df["symbol"].astype(str).tolist()]
+        symbols = [
+            normalize_symbol(s, market3) for s in in_df["symbol"].astype(str).tolist()
+        ]
 
         out_rows = []
         with st.spinner("جاري التحليل..."):
             for sym in symbols:
                 df, summary = analyze_symbol(sym, period3)
                 if df is None:
-                    out_rows.append({"symbol": sym, "status": "fail", "reason": summary})
+                    out_rows.append(
+                        {"symbol": sym, "status": "fail", "reason": summary}
+                    )
                 else:
-                    out_rows.append({
-                        "symbol": sym,
-                        "status": "ok",
-                        "last_close": round(summary["آخر إغلاق"], 2),
-                        "rsi14": round(summary["RSI14"], 2) if summary["RSI14"] is not None else None,
-                        "trend": summary["الاتجاه"],
-                        "rsi_state": summary["حالة RSI"],
-                    })
+                    out_rows.append(
+                        {
+                            "symbol": sym,
+                            "status": "ok",
+                            "last_close": round(summary["آخر إغلاق"], 2),
+                            "rsi14": (
+                                round(summary["RSI14"], 2)
+                                if summary["RSI14"] is not None
+                                else None
+                            ),
+                            "trend": summary["الاتجاه"],
+                            "rsi_state": summary["حالة RSI"],
+                        }
+                    )
 
         out_df = pd.DataFrame(out_rows)
         st.dataframe(out_df, use_container_width=True)
