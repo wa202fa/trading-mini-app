@@ -75,6 +75,21 @@ def safe_float(x):
     except Exception:
         return None
 
+# --- RSI Alerts helper ---
+def rsi_alert_label(rsi_value, low=30, high=70):
+    """
+    يرجع: (emoji, label)
+    """
+    r = safe_float(rsi_value)
+    if r is None:
+        return "—", "غير متاح"
+    if r <= low:
+        return "🟢", "تشبع بيع"
+    if r >= high:
+        return "🟠", "تشبع شراء"
+    return "🔵", "طبيعي"
+# --- End RSI Alerts helper ---
+
 def analyze_symbol(symbol: str, period: str):
     """
     يرجع (df, info) أو (None, None) لو فشل
@@ -256,7 +271,7 @@ with colA:
     run_single = st.button("🔍 حلّل السهم", use_container_width=True)
 
 if run_single:
-    st.write(f"جاري جلب البيانات لـ: *{symbol}*")
+    st.write(f"جاري جلب البيانات لـ: {symbol}")
     df, info = analyze_symbol(symbol, PERIOD_OPTIONS[period])
 
     if df is None or info is None:
@@ -295,19 +310,32 @@ if run_single:
         c2.metric("RSI", f"{info['RSI14']:.2f}" if info["RSI14"] is not None else "—")
         c3.metric("الاتجاه", info["Trend"])
 
+        # ✅ تنبيه RSI (واضح ومضمون)
+        st.subheader("🔔 تنبيه RSI")
+        r = info.get("RSI14", None)
+        emoji, label = rsi_alert_label(r)
+        if label == "تشبع بيع":
+            st.success(f"{emoji} {label} — ممكن ارتداد (RSI منخفض)")
+        elif label == "تشبع شراء":
+            st.warning(f"{emoji} {label} — انتبه من تصحيح (RSI مرتفع)")
+        elif label == "طبيعي":
+            st.info(f"{emoji} {label} — ما فيه تشبع واضح")
+        else:
+            st.info("🔔 RSI غير متاح")
+
         # إشارات
         st.subheader("الإشارة")
         if enable_entry:
             ok, reason, stop_p, score = detect_entry_opportunity(df, risk_level)
             if ok:
-                st.success(f"✅ *تنبيه فرصة الدخول* — الدرجة: {score}/5 — وقف خسارة تقريبي: {stop_p:.2f}" if stop_p else f"✅ *تنبيه فرصة الدخول* — الدرجة: {score}/5")
+                st.success(f"✅ تنبيه فرصة الدخول — الدرجة: {score}/5 — وقف خسارة تقريبي: {stop_p:.2f}" if stop_p else f"✅ تنبيه فرصة الدخول — الدرجة: {score}/5")
             else:
                 st.info(f"ℹ️ فرصة الدخول غير متحققة — ({reason})")
 
         if enable_breakout:
             b_ok, b_reason, level, b_stop = detect_breakout(df, int(breakout_lookback), risk_level)
             if b_ok:
-                msg = f"🚀 *Breakout* — مستوى الكسر: {level:.2f}"
+                msg = f"🚀 Breakout — مستوى الكسر: {level:.2f}"
                 if b_stop is not None:
                     msg += f" — وقف خسارة: {b_stop:.2f}"
                 st.success(msg)
@@ -356,6 +384,7 @@ if scan_btn:
                 "الرمز": sym,
                 "الاتجاه": "—",
                 "RSI": "—",
+                "تنبيه RSI": "—",
                 "فرصة دخول؟": "❌",
                 "Breakout؟": "—",
                 "وقف خسارة": "—",
@@ -367,10 +396,15 @@ if scan_btn:
         b_ok, b_reason, level, b_stop = detect_breakout(df, int(breakout_lookback), risk_level) if enable_breakout else (False, "", None, None)
         final_stop = b_stop if b_ok else stop_p
 
+        # RSI Alert for table
+        emoji, label = rsi_alert_label(info.get("RSI14", None))
+        rsi_text = f"{emoji} {label}" if label != "غير متاح" else "—"
+
         rows.append({
             "الرمز": sym,
             "الاتجاه": info["Trend"],
             "RSI": f"{info['RSI14']:.2f}" if info["RSI14"] is not None else "—",
+            "تنبيه RSI": rsi_text,
             "فرصة دخول؟": "✅" if ok else "❌",
             "Breakout؟": "🚀" if b_ok else "—",
             "وقف خسارة": f"{final_stop:.2f}" if final_stop is not None else "—",
@@ -379,7 +413,7 @@ if scan_btn:
     out = pd.DataFrame(rows)
 
     # ترتيب أعمدة ثابت
-    preferred = ["الرمز", "الاتجاه", "RSI", "فرصة دخول؟", "Breakout؟", "وقف خسارة"]
+    preferred = ["الرمز", "الاتجاه", "RSI", "تنبيه RSI", "فرصة دخول؟", "Breakout؟", "وقف خسارة"]
     cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
     out = out[cols]
 
@@ -397,8 +431,4 @@ if scan_btn:
 
     only_ok = out[mask]
     if only_ok.empty:
-        st.info("ما فيه فرص دخول/Breakout حسب الشروط الحالية.")
-    else:
-        st.dataframe(only_ok, use_container_width=True)
-
-st.caption("ملاحظة: للأسهم السعودية اكتبي 2222 أو 2222.SR — التطبيق يحولها تلقائياً.")
+        st.info
