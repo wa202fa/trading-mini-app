@@ -32,7 +32,6 @@ def to_tadawul_symbol(sym: str) -> str:
     s = sym.strip().upper()
     if s.endswith(".SR"):
         return s
-    # إذا أرقام فقط (مثل 2222) نخليها 2222.SR
     if s.replace(".", "").isdigit():
         return f"{s}.SR"
     return s
@@ -77,9 +76,6 @@ def safe_float(x):
 
 # --- RSI Alerts helper ---
 def rsi_alert_label(rsi_value, low=30, high=70):
-    """
-    يرجع: (emoji, label)
-    """
     r = safe_float(rsi_value)
     if r is None:
         return "—", "غير متاح"
@@ -91,9 +87,6 @@ def rsi_alert_label(rsi_value, low=30, high=70):
 # --- End RSI Alerts helper ---
 
 def analyze_symbol(symbol: str, period: str):
-    """
-    يرجع (df, info) أو (None, None) لو فشل
-    """
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, auto_adjust=False)
@@ -101,7 +94,6 @@ def analyze_symbol(symbol: str, period: str):
         if df is None or df.empty:
             return None, None
 
-        # تنظيف
         df = df.dropna(subset=["Close"]).copy()
         if df.empty:
             return None, None
@@ -133,13 +125,6 @@ def analyze_symbol(symbol: str, period: str):
         return None, None
 
 def detect_entry_opportunity(df: pd.DataFrame, risk_level: str):
-    """
-    فرصة دخول بسيطة:
-    - اتجاه صاعد (MA20 > MA50)
-    - RSI بين 45 و 70
-    - السعر فوق MA20
-    يعطي: ok, reason, stop_price, score
-    """
     p = RISK_PRESETS[risk_level]
     atr_mult = p["atr_mult"]
 
@@ -177,22 +162,15 @@ def detect_entry_opportunity(df: pd.DataFrame, risk_level: str):
     else:
         reasons.append("السعر تحت MA20")
 
-    # وقف خسارة: ATR * multiplier تحت السعر
     stop_price = None
     if last_atr is not None:
         stop_price = max(0.0, last_close - (last_atr * atr_mult))
 
-    ok = score >= 4  # لازم 4/5
+    ok = score >= 4
     reason = "، ".join(reasons) if reasons else "مطابق للشروط"
     return ok, reason, stop_price, score
 
 def detect_breakout(df: pd.DataFrame, lookback: int, risk_level: str):
-    """
-    Breakout بسيط:
-    - إغلاق اليوم > أعلى قمة خلال lookback يوم (باستثناء اليوم)
-    - حجم اليوم >= متوسط حجم 20 يوم (اختياري إن توفر)
-    وقف الخسارة: تحت مستوى الكسر أو ATR
-    """
     p = RISK_PRESETS[risk_level]
     atr_mult = p["atr_mult"]
 
@@ -205,7 +183,7 @@ def detect_breakout(df: pd.DataFrame, lookback: int, risk_level: str):
     a = df["ATR14"].astype(float) if "ATR14" in df.columns else None
 
     last_close = safe_float(close.iloc[-1])
-    prev_highs = high.iloc[-(lookback+1):-1]  # آخر lookback بدون اليوم
+    prev_highs = high.iloc[-(lookback+1):-1]
     level = safe_float(prev_highs.max())
 
     if last_close is None or level is None:
@@ -217,7 +195,7 @@ def detect_breakout(df: pd.DataFrame, lookback: int, risk_level: str):
         last_v = safe_float(v.iloc[-1])
         v_avg = safe_float(v.rolling(20).mean().iloc[-1])
         if (last_v is not None) and (v_avg is not None) and (v_avg > 0):
-            vol_ok = last_v >= v_avg * 0.9  # تساهل بسيط
+            vol_ok = last_v >= v_avg * 0.9
 
     is_break = (last_close > level) and vol_ok
 
@@ -226,7 +204,7 @@ def detect_breakout(df: pd.DataFrame, lookback: int, risk_level: str):
     if last_atr is not None:
         b_stop = max(0.0, last_close - (last_atr * atr_mult))
     if level is not None and b_stop is not None:
-        b_stop = min(b_stop, level)  # خلي الوقف على الأقل تحت مستوى الكسر
+        b_stop = min(b_stop, level)
 
     reason = "كسر مقاومة + حجم جيد" if is_break else "ما تحقق الكسر/الحجم"
     return is_break, reason, level, b_stop
@@ -237,14 +215,13 @@ def detect_breakout(df: pd.DataFrame, lookback: int, risk_level: str):
 st.title("📈 Trading Mini App (US + Saudi Tadawul)")
 st.caption("تحليل بسيط + RSI + اتجاه + قائمة متابعة + تنبيه فرصة دخول + Breakout")
 
-# Sidebar
 with st.sidebar:
     st.header("⚙️ الإعدادات")
 
     market = st.selectbox("السوق", ["أمريكي", "سعودي"], index=0)
     symbol_input = st.text_input("اكتب الرمز", value="AAPL" if market == "أمريكي" else "2222")
-    period = st.selectbox("اختر المدة", list(PERIOD_OPTIONS.keys()), index=2)  # 6mo
-    risk_level = st.selectbox("وضع المخاطرة", list(RISK_PRESETS.keys()), index=1)  # متوسط
+    period = st.selectbox("اختر المدة", list(PERIOD_OPTIONS.keys()), index=2)
+    risk_level = st.selectbox("وضع المخاطرة", list(RISK_PRESETS.keys()), index=1)
 
     enable_entry = st.toggle("تفعيل تنبيه فرصة الدخول", value=True)
     enable_breakout = st.toggle("تفعيل تنبيه كسر مقاومة (Breakout)", value=True)
@@ -253,9 +230,10 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📋 قائمة المتابعة")
     watchlist_text = st.text_area("القائمة (سطر لكل سهم)", value="AAPL\nNVDA\n2222", height=110)
+
+    top_n = st.selectbox("كم سهم نعرض في الترتيب؟", [3, 5, 10, 15, 20], index=1)
     scan_btn = st.button("🚀 افحص القائمة", use_container_width=True)
 
-# تجهيز الرمز حسب السوق
 symbol = symbol_input.strip().upper()
 if market == "سعودي":
     symbol = to_tadawul_symbol(symbol)
@@ -279,7 +257,6 @@ if run_single:
     else:
         st.success("✅ تم جلب البيانات بنجاح")
 
-        # --- Chart (analysis button) ---
         try:
             _df = df.copy()
             cols = {c.lower(): c for c in _df.columns}
@@ -301,16 +278,12 @@ if run_single:
                 st.info("ما قدرت أرسم الشارت لأن البيانات ما فيها أعمدة Open/High/Low/Close بشكل واضح.")
         except Exception as e:
             st.warning(f"تعذر رسم الشارت: {e}")
-        # --- End Chart ---
 
-
-        # مؤشرات أعلى الصفحة
         c1, c2, c3 = st.columns(3)
         c1.metric("السعر الحالي", f"{info['Close']:.2f}" if info["Close"] is not None else "—")
         c2.metric("RSI", f"{info['RSI14']:.2f}" if info["RSI14"] is not None else "—")
         c3.metric("الاتجاه", info["Trend"])
 
-        # ✅ تنبيه RSI (واضح ومضمون)
         st.subheader("🔔 تنبيه RSI")
         r = info.get("RSI14", None)
         emoji, label = rsi_alert_label(r)
@@ -323,7 +296,6 @@ if run_single:
         else:
             st.info("🔔 RSI غير متاح")
 
-        # إشارات
         st.subheader("الإشارة")
         if enable_entry:
             ok, reason, stop_p, score = detect_entry_opportunity(df, risk_level)
@@ -343,7 +315,6 @@ if run_single:
                 st.info("ℹ️ Breakout غير متحقق حالياً")
 
         st.markdown("### جدول الأسعار")
-        # عرض مرتب: آخر 60 صف فقط
         show = df[["Open", "High", "Low", "Close", "Volume"]].tail(60).copy()
         show.index = pd.to_datetime(show.index).date
         st.dataframe(show, use_container_width=True)
@@ -356,7 +327,6 @@ st.markdown("## 🔎 فحص قائمة المتابعة")
 
 def parse_watchlist(txt: str):
     items = [x.strip() for x in (txt or "").splitlines() if x.strip()]
-    # حذف التكرار مع الحفاظ على الترتيب
     seen = set()
     out = []
     for it in items:
@@ -382,6 +352,7 @@ if scan_btn:
         if df is None or info is None:
             rows.append({
                 "الرمز": sym,
+                "درجة الفرصة": 0,
                 "الاتجاه": "—",
                 "RSI": "—",
                 "تنبيه RSI": "—",
@@ -391,17 +362,19 @@ if scan_btn:
             })
             continue
 
-        # Entry + Breakout
         ok, reason, stop_p, score = detect_entry_opportunity(df, risk_level) if enable_entry else (False, "", None, 0)
         b_ok, b_reason, level, b_stop = detect_breakout(df, int(breakout_lookback), risk_level) if enable_breakout else (False, "", None, None)
         final_stop = b_stop if b_ok else stop_p
 
-        # RSI Alert for table
         emoji, label = rsi_alert_label(info.get("RSI14", None))
         rsi_text = f"{emoji} {label}" if label != "غير متاح" else "—"
 
+        # ✅ درجة الفرصة: Score (0..5) + بونص Breakout (0 أو 2)
+        opp_score = int(score) + (2 if b_ok else 0)
+
         rows.append({
             "الرمز": sym,
+            "درجة الفرصة": opp_score,
             "الاتجاه": info["Trend"],
             "RSI": f"{info['RSI14']:.2f}" if info["RSI14"] is not None else "—",
             "تنبيه RSI": rsi_text,
@@ -412,23 +385,36 @@ if scan_btn:
 
     out = pd.DataFrame(rows)
 
-    # ترتيب أعمدة ثابت
-    preferred = ["الرمز", "الاتجاه", "RSI", "تنبيه RSI", "فرصة دخول؟", "Breakout؟", "وقف خسارة"]
+    preferred = ["الرمز", "درجة الفرصة", "الاتجاه", "RSI", "تنبيه RSI", "فرصة دخول؟", "Breakout؟", "وقف خسارة"]
     cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
     out = out[cols]
 
-    st.dataframe(out, use_container_width=True)
+    # ✅ ترتيب من الأفضل للأقل
+    out_sorted = out.sort_values(by=["درجة الفرصة", "Breakout؟", "فرصة دخول؟"], ascending=[False, False, False], kind="mergesort")
+
+    st.markdown("### 🏆 ترتيب الأسهم (الأقوى أولاً)")
+    top = out_sorted.head(int(top_n)).copy()
+    st.dataframe(top, use_container_width=True)
+
+    st.markdown("### 📋 كل النتائج (مرتبة)")
+    st.dataframe(out_sorted, use_container_width=True)
 
     st.markdown("### ⭐ الفرص فقط")
     entry_col = "فرصة دخول؟"
     brk_col = "Breakout؟"
 
-    mask = pd.Series([False] * len(out), index=out.index)
-    if enable_entry and entry_col in out.columns:
-        mask = mask | out[entry_col].astype(str).str.contains("✅")
-    if enable_breakout and brk_col in out.columns:
-        mask = mask | out[brk_col].astype(str).str.contains("🚀")
+    mask = pd.Series([False] * len(out_sorted), index=out_sorted.index)
+    if enable_entry and entry_col in out_sorted.columns:
+        mask = mask | out_sorted[entry_col].astype(str).str.contains("✅")
+    if enable_breakout and brk_col in out_sorted.columns:
+        mask = mask | out_sorted[brk_col].astype(str).str.contains("🚀")
 
-    only_ok = out[mask]
+    only_ok = out_sorted[mask]
     if only_ok.empty:
-        st.info
+        st.info("ما فيه فرص دخول/Breakout حسب الشروط الحالية.")
+    else:
+        st.dataframe(only_ok, use_container_width=True)
+
+    st.caption("ملاحظة: درجة الفرصة = (Score فرصة الدخول 0..5) + (2 إذا فيه Breakout).")
+
+st.caption("ملاحظة: للأسهم السعودية اكتبي 2222 أو 2222.SR — التطبيق يحولها تلقائياً.")
