@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 
 # =========================
 # إعدادات عامة
@@ -262,6 +263,31 @@ if run_single:
         st.error("❌ ما قدرت أجيب بيانات السهم. (تأكدي من الرمز + الإنترنت)")
     else:
         st.success("✅ تم جلب البيانات بنجاح")
+
+        # --- Chart (analysis button) ---
+        try:
+            _df = df.copy()
+            cols = {c.lower(): c for c in _df.columns}
+            def pick(key):
+                for k,v in cols.items():
+                    if k == key or key in k:
+                        return v
+                return None
+            o = pick("open"); h = pick("high"); l = pick("low"); c = pick("close")
+            if all([o,h,l,c]) and len(_df) > 5:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=_df.index,
+                    open=_df[o], high=_df[h], low=_df[l], close=_df[c],
+                )])
+                fig.update_layout(height=420, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=30,b=10))
+                st.subheader("📈 الشارت")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("ما قدرت أرسم الشارت لأن البيانات ما فيها أعمدة Open/High/Low/Close بشكل واضح.")
+        except Exception as e:
+            st.warning(f"تعذر رسم الشارت: {e}")
+        # --- End Chart ---
+
 
         # مؤشرات أعلى الصفحة
         c1, c2, c3 = st.columns(3)
