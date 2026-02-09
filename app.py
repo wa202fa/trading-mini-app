@@ -1,285 +1,196 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
+from pathlib import Path
 
-# =========================
-# Page
-# =========================
-st.set_page_config(page_title="Trading App", layout="wide")
+# -----------------------
+# Config
+# -----------------------
+st.set_page_config(page_title="Trading App", page_icon="📈", layout="wide")
 
-# Hide sidebar بالكامل
-st.markdown("""
-<style>
-[data-testid="stSidebar"] {display: none;}
-[data-testid="collapsedControl"] {display: none;}
-</style>
-""", unsafe_allow_html=True)
+# استخدم مجلد التشغيل الحالي بدل _file_
+BASE = Path.cwd()
+US_PATH = BASE / "data" / "universe" / "us_symbols.txt"
+SA_PATH = BASE / "data" / "universe" / "sa_symbols.txt"
 
-# =========================
-# Defaults (عدلها لاحقًا)
-# =========================
-US_DEFAULT = ["AAPL","NVDA","TSLA","MSFT","AMZN","GOOGL","META","NFLX","AMD","INTC","PLTR","AVGO","TSM","SPY","QQQ"]
-SA_DEFAULT = ["1010.SR","1020.SR","1120.SR","1180.SR","2010.SR","2020.SR","2030.SR","2222.SR","2290.SR","2300.SR","2380.SR","4260.SR"]
+DEFAULT_PERIOD = "6mo"
+DEFAULT_INTERVAL = "1d"
 
-# =========================
-# Indicators
-# =========================
-def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+# -----------------------
+# Helpers
+# -----------------------
+def load_symbols(p: Path) -> list[str]:
+    if not p.exists():
+        return []
+    syms = [l.strip() for l in p.read_text(encoding="utf-8", errors="ignore").splitlines() if l.strip()]
+    seen = set()
+    out = []
+    for s in syms:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+def calc_rsi(close: pd.Series, length: int = 14) -> pd.Series:
     delta = close.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(method="bfill").fillna(50)
 
-def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def calc_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/length, adjust=False).mean()
+    return atr.fillna(method="bfill")
 
-def safe_float(x, default=np.nan):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-# =========================
-# Data
-# =========================
-@st.cache_data(ttl=600)
-def download_symbol(symbol: str, period: str):
-    df = yf.download(symbol, period=period, progress=False, auto_adjust=False, threads=True)
+@st.cache_data(show_spinner=False, ttl=60*15)
+def fetch_history(symbol: str, period: str = DEFAULT_PERIOD, interval: str = DEFAULT_INTERVAL) -> pd.DataFrame:
+    t = yf.Ticker(symbol)
+    df = t.history(period=period, interval=interval, auto_adjust=False)
     if df is None or df.empty:
-        return None
+        return pd.DataFrame()
+    df = df.copy()
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    return df
 
-    # Normalize yfinance MultiIndex columns if it happens
-    if isinstance(df.columns, pd.MultiIndex):
-        lvl1 = df.columns.get_level_values(1)
-        if symbol in set(lvl1):
-            df = df.xs(symbol, axis=1, level=1, drop_level=True)
-        else:
-            first_ticker = list(dict.fromkeys(lvl1))[0]
-            df = df.xs(first_ticker, axis=1, level=1, drop_level=True)
-
-    df = df.dropna()
-    return None if df.empty else df
-
-def compute_trend(last_close, ma20, ma50):
-    if last_close > ma20 and last_close > ma50:
+def trend_label(df: pd.DataFrame) -> str:
+    if df.empty or len(df) < 30:
+        return "غير واضح"
+    sma20 = df["Close"].rolling(20).mean()
+    sma50 = df["Close"].rolling(50).mean()
+    last20 = sma20.iloc[-1]
+    last50 = sma50.iloc[-1]
+    if np.isnan(last20) or np.isnan(last50):
+        return "غير واضح"
+    if last20 > last50:
         return "صاعد"
-    if last_close < ma20 and last_close < ma50:
+    if last20 < last50:
         return "هابط"
-    return "متذبذب"
+    return "عرضي"
 
-def score_stock(last_close, ma20, ma50, rsi, vol, vol_ma20, mode: str):
-    score = 0.0
+def fmt_symbol(sym: str, market: str) -> str:
+    sym = sym.strip().upper()
+    if market == "SA":
+        if sym.endswith(".SR"):
+            return sym
+        if sym.isdigit():
+            return f"{sym}.SR"
+    return sym
 
-    # Trend (40)
-    if last_close > ma20 and ma20 > ma50:
-        score += 40
-    elif last_close > ma20:
-        score += 25
-    elif last_close > ma50:
-        score += 15
-    else:
-        score += 5
+def ensure_state():
+    if "active_market" not in st.session_state:
+        st.session_state.active_market = None
+    if "chosen_symbol" not in st.session_state:
+        st.session_state.chosen_symbol = None
 
-    # RSI (30)
-    if mode == "Swing":
-        if 45 <= rsi <= 65:
-            score += 30
-        elif 35 <= rsi < 45 or 65 < rsi <= 72:
-            score += 18
-        elif rsi > 72:
-            score += 6
-        else:
-            score += 10
-    else:  # DayTrade
-        if 35 <= rsi <= 60:
-            score += 30
-        elif 25 <= rsi < 35 or 60 < rsi <= 70:
-            score += 18
-        elif rsi > 70:
-            score += 8
-        else:
-            score += 12
+ensure_state()
 
-    # Volume (20)
-    if np.isnan(vol_ma20) or vol_ma20 == 0:
-        score += 8
-    else:
-        ratio = vol / vol_ma20
-        if ratio >= 1.5:
-            score += 20
-        elif ratio >= 1.2:
-            score += 16
-        elif ratio >= 1.0:
-            score += 12
-        elif ratio >= 0.8:
-            score += 8
-        else:
-            score += 4
+US_SYMBOLS = load_symbols(US_PATH)
+SA_SYMBOLS = load_symbols(SA_PATH)
 
-    # Setup boost (10)
-    if last_close > ma20 and rsi < 70:
-        score += 10
-    elif rsi < 35:
-        score += 6
-    else:
-        score += 3
-
-    return max(0, min(100, round(score, 1)))
-
-def recommendation_from_score(score: float, trend: str, rsi: float):
-    if score >= 75 and trend == "صاعد" and rsi < 72:
-        return "BUY ✅"
-    if score >= 60:
-        return "WATCH 👀"
-    return "WAIT ⏳"
-
-def build_trade_plan(df: pd.DataFrame, mode: str):
-    last_close = safe_float(df["Close"].iloc[-1])
-    atr = calc_atr(df, 14)
-    last_atr = safe_float(atr.iloc[-1])
-
-    stop_mult = 1.0 if mode == "DayTrade" else 1.8
-    if np.isnan(last_atr) or last_atr == 0:
-        stop_pct = 0.03 if mode == "DayTrade" else 0.06
-        stop = last_close * (1 - stop_pct)
-    else:
-        stop = last_close - (stop_mult * last_atr)
-
-    risk = last_close - stop
-    if risk <= 0:
-        return None
-
-    return {
-        "Entry": round(last_close, 2),
-        "Stop": round(stop, 2),
-        "Risk (R)": round(risk, 2),
-        "Target 1 (1R)": round(last_close + 1 * risk, 2),
-        "Target 2 (2R)": round(last_close + 2 * risk, 2),
-        "Target 3 (3R)": round(last_close + 3 * risk, 2),
-    }
-
-def analyze_symbol(symbol: str, period: str, mode: str):
-    df = download_symbol(symbol, period)
-    if df is None:
-        return None
-
-    close = df["Close"]
-    vol = df["Volume"]
-
-    ma20 = close.rolling(20).mean()
-    ma50 = close.rolling(50).mean()
-    rsi = calc_rsi(close, 14)
-    vol_ma20 = vol.rolling(20).mean()
-
-    last_close = safe_float(close.iloc[-1])
-    last_ma20 = safe_float(ma20.iloc[-1])
-    last_ma50 = safe_float(ma50.iloc[-1])
-    last_rsi = safe_float(rsi.iloc[-1])
-    last_vol = safe_float(vol.iloc[-1])
-    last_vol_ma20 = safe_float(vol_ma20.iloc[-1])
-
-    trend = compute_trend(last_close, last_ma20, last_ma50)
-    score = score_stock(last_close, last_ma20, last_ma50, last_rsi, last_vol, last_vol_ma20, mode)
-    rec = recommendation_from_score(score, trend, last_rsi)
-    plan = build_trade_plan(df, mode)
-
-    out = {
-        "Symbol": symbol,
-        "Score": score,
-        "Recommendation": rec,
-        "Trend": trend,
-        "Last Close": round(last_close, 2),
-        "MA20": round(last_ma20, 2),
-        "MA50": round(last_ma50, 2),
-        "RSI": round(last_rsi, 2),
-        "Vol/Avg20": round((last_vol / last_vol_ma20), 2) if (not np.isnan(last_vol_ma20) and last_vol_ma20 != 0) else np.nan,
-    }
-    if plan:
-        out.update(plan)
-
-    return out, df, plan
-
-# =========================
-# UI State
-# =========================
-if "market" not in st.session_state:
-    st.session_state.market = None
-if "chosen_symbol" not in st.session_state:
-    st.session_state.chosen_symbol = None
-
-# =========================
-# UI Header
-# =========================
+# -----------------------
+# UI
+# -----------------------
 st.title("Trading App")
-st.subheader("الأسواق")
+st.subheader("اختر السوق")
 
 c1, c2 = st.columns(2)
 with c1:
-    if st.button("🇺🇸 السوق الأمريكي", use_container_width=True, key="market_us"):
-        st.session_state.market = "US"
+    if st.button("🇺🇸 السوق الأمريكي", use_container_width=True):
+        st.session_state.active_market = "US"
+        st.session_state.chosen_symbol = None
+        st.rerun()
+
 with c2:
-    if st.button("🇸🇦 السوق السعودي", use_container_width=True, key="market_sa"):
-        st.session_state.market = "SA"
+    if st.button("🇸🇦 السوق السعودي", use_container_width=True):
+        st.session_state.active_market = "SA"
+        st.session_state.chosen_symbol = None
+        st.rerun()
 
-st.markdown("---")
+st.divider()
 
-# =========================
-# Market list (Auto analysis on selection)
-# =========================
-if st.session_state.market is None:
-    st.info("اختر سوق عشان تظهر قائمة الأسهم.")
+active = st.session_state.active_market
+
+if active is None:
+    st.info("اختر سوق من الأعلى لعرض قائمة الأسهم.")
+    st.stop()
+
+if active == "US":
+    st.markdown("## 🇺🇸 السوق الأمريكي")
+    if len(US_SYMBOLS) < 100:
+        st.warning(f"قائمة أمريكا أقل من 100 سهم (الموجود: {len(US_SYMBOLS)})")
+    options = US_SYMBOLS if US_SYMBOLS else ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
 else:
-    period = st.selectbox("المدة", ["3mo", "6mo", "1y", "2y"], index=1)
-    mode = st.selectbox("نوع التحليل", ["DayTrade", "Swing"], index=1,
-                        format_func=lambda x: "مضاربة" if x == "DayTrade" else "سوينق")
+    st.markdown("## 🇸🇦 السوق السعودي")
+    if len(SA_SYMBOLS) < 100:
+        st.warning(f"قائمة السعودية أقل من 100 سهم (الموجود: {len(SA_SYMBOLS)})")
+    options = SA_SYMBOLS if SA_SYMBOLS else ["1010.SR", "1020.SR", "2010.SR", "2020.SR", "2030.SR"]
 
-    if st.session_state.market == "US":
-        st.markdown("### 🇺🇸 السوق الأمريكي")
-        pick = st.radio("اختر سهم", US_DEFAULT, key="pick_us", label_visibility="collapsed")
-    else:
-        st.markdown("### 🇸🇦 السوق السعودي")
-        pick = st.radio("اختر سهم", SA_DEFAULT, key="pick_sa", label_visibility="collapsed")
+picked = st.selectbox("اختر السهم", options=options, index=0 if options else None)
 
-    # ✅ هذا هو الربط: مجرد الاختيار = يتحدث السهم + تحليل تلقائي
-    st.session_state.chosen_symbol = pick
+symbol = fmt_symbol(picked, active)
+st.session_state.chosen_symbol = symbol
 
-    st.markdown("---")
-    st.success(f"✅ السهم المختار الآن: {st.session_state.chosen_symbol}")
+st.success(f"✅ السهم المختار: {symbol}")
+st.caption("يتم الآن جلب البيانات وتحليل السهم تلقائياً…")
 
-    res = analyze_symbol(st.session_state.chosen_symbol, period=period, mode=mode)
-    if not res:
-        st.error("ما قدرت أجيب بيانات. تأكد من الرمز أو جرّب مدة ثانية.")
-    else:
-        out, df, plan = res
+with st.spinner("جاري التحليل..."):
+    df = fetch_history(symbol)
 
-        st.subheader(f"{out['Symbol']} — {out['Recommendation']} (Score: {out['Score']})")
+if df.empty:
+    st.error("❌ ما قدرنا نجلب بيانات لهذا السهم.")
+    st.stop()
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Trend", out["Trend"])
-        m2.metric("RSI", out["RSI"])
-        m3.metric("Close", out["Last Close"])
-        m4.metric("Vol/Avg20", out["Vol/Avg20"])
+df["RSI"] = calc_rsi(df["Close"], 14)
+df["ATR"] = calc_atr(df, 14)
 
-        st.markdown("### 🎯 دخول / وقف / أهداف")
-        if plan:
-            p1, p2, p3, p4, p5, p6 = st.columns(6)
-            p1.metric("Entry", out["Entry"])
-            p2.metric("Stop", out["Stop"])
-            p3.metric("1R", out["Target 1 (1R)"])
-            p4.metric("2R", out["Target 2 (2R)"])
-            p5.metric("3R", out["Target 3 (3R)"])
-            p6.metric("Risk", out["Risk (R)"])
-        else:
-            st.warning("ما قدرت أبني خطة (بيانات ATR غير كافية).")
+price = float(df["Close"].iloc[-1])
+rsi = float(df["RSI"].iloc[-1])
+atr = float(df["ATR"].iloc[-1])
+trend = trend_label(df)
 
-        st.markdown("### 📊 الشارت")
-        st.line_chart(df["Close"])
+entry = price
+stop = price - (2.0 * atr)
+r1 = price + (2.0 * atr)
+r2 = price + (3.0 * atr)
+r3 = price + (4.0 * atr)
+
+msg = "مناسب مبدئياً للدخول."
+if rsi >= 70:
+    msg = "⚠️ RSI مرتفع (تشبع شراء)."
+elif rsi <= 30:
+    msg = "✅ RSI منخفض (تشبع بيع)."
+
+st.divider()
+st.markdown("## 📊 التحليل")
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("السعر الحالي", f"{price:.2f}")
+m2.metric("الاتجاه", trend)
+m3.metric("RSI", f"{rsi:.1f}")
+m4.metric("ATR", f"{atr:.2f}")
+
+st.success(msg)
+
+st.markdown("## 🎯 خطة الدخول")
+p1, p2, p3, p4, p5 = st.columns(5)
+p1.metric("دخول", f"{entry:.2f}")
+p2.metric("وقف", f"{stop:.2f}")
+p3.metric("هدف 1", f"{r1:.2f}")
+p4.metric("هدف 2", f"{r2:.2f}")
+p5.metric("هدف 3", f"{r3:.2f}")
+
+with st.expander("عرض آخر البيانات"):
+    st.dataframe(df.tail(30), use_container_width=True)
