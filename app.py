@@ -1,405 +1,285 @@
-import math
-from dataclasses import dataclass
-from pathlib import Path
-
-import pandas as pd
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
 
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
+# =========================
+# Page
+# =========================
+st.set_page_config(page_title="Trading App", layout="wide")
 
+# Hide sidebar بالكامل
+st.markdown("""
+<style>
+[data-testid="stSidebar"] {display: none;}
+[data-testid="collapsedControl"] {display: none;}
+</style>
+""", unsafe_allow_html=True)
 
-# =============================
-# Paths / Universe
-# =============================
-DATA_DIR = Path("data/universe")
-US_SYMBOLS_FILE = DATA_DIR / "us_symbols.txt"
-SA_SYMBOLS_FILE = DATA_DIR / "sa_symbols.txt"   # تاسي فقط، رموز أرقام + .SR
+# =========================
+# Defaults (عدلها لاحقًا)
+# =========================
+US_DEFAULT = ["AAPL","NVDA","TSLA","MSFT","AMZN","GOOGL","META","NFLX","AMD","INTC","PLTR","AVGO","TSM","SPY","QQQ"]
+SA_DEFAULT = ["1010.SR","1020.SR","1120.SR","1180.SR","2010.SR","2020.SR","2030.SR","2222.SR","2290.SR","2300.SR","2380.SR","4260.SR"]
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _read_symbols(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    out = []
-    for ln in path.read_text(encoding="utf-8").splitlines():
-        s = ln.strip()
-        if not s or s.startswith("#"):
-            continue
-        out.append(s.upper())
-    return sorted(list(dict.fromkeys(out)))
-
-
-def load_universe(market: str) -> list[str]:
-    if market == "US":
-        return _read_symbols(US_SYMBOLS_FILE)
-    if market == "SA":
-        syms = _read_symbols(SA_SYMBOLS_FILE)
-        fixed = []
-        for s in syms:
-            s = s.upper()
-            if s.isdigit():
-                fixed.append(f"{s}.SR")
-            elif s.endswith(".SR"):
-                fixed.append(s)
-        return sorted(list(dict.fromkeys(fixed)))
-    return []
-
-
-# =============================
+# =========================
 # Indicators
-# =============================
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+# =========================
+def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
-    up = delta.clip(lower=0)
-    down = (-delta).clip(lower=0)
-    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
-    rs = ma_up / (ma_down.replace(0, pd.NA))
-    out = 100 - (100 / (1 + rs))
-    return out.fillna(method="bfill").fillna(50)
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-
-def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/period, adjust=False).mean()
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
+def safe_float(x, default=np.nan):
+    try:
+        return float(x)
+    except Exception:
+        return default
 
-@dataclass
-class Plan:
-    entry: float
-    stop: float
-    targets: list[float]
-    risk_label: str
-    rr: float
-
-
-def risk_label_from_atr_pct(atr_pct: float) -> str:
-    if atr_pct < 2.0:
-        return "منخفض"
-    if atr_pct < 4.0:
-        return "متوسط"
-    return "مرتفع"
-
-
-def build_plan(price: float, atr_v: float) -> Plan:
-    entry = float(price)
-    stop = float(max(0.01, entry - 2.0 * atr_v))
-    targets = [entry + 2.0 * atr_v, entry + 3.0 * atr_v, entry + 4.0 * atr_v]
-    atr_pct = (atr_v / entry) * 100 if entry else 0.0
-    risk_label = risk_label_from_atr_pct(atr_pct)
-
-    risk = max(0.01, entry - stop)
-    reward = max(0.01, targets[0] - entry)
-    rr = reward / risk if risk else 0.0
-
-    return Plan(entry=entry, stop=stop, targets=[float(x) for x in targets], risk_label=risk_label, rr=float(rr))
-
-
-def score_opportunity(df: pd.DataFrame) -> tuple[float, dict]:
-    close = df["Close"]
-    e20 = ema(close, 20)
-    e50 = ema(close, 50)
-    r = rsi(close, 14)
-
-    last = df.iloc[-1]
-    price = float(last["Close"])
-    e20v = float(e20.iloc[-1])
-    e50v = float(e50.iloc[-1])
-    rv = float(r.iloc[-1])
-
-    trend = 0.0
-    if price > e20v:
-        trend += 2.0
-    if e20v > e50v:
-        trend += 2.0
-    if price > e50v:
-        trend += 1.0
-
-    rsi_pts = 0.0
-    if 45 <= rv <= 65:
-        rsi_pts += 3.0
-    elif 35 <= rv < 45 or 65 < rv <= 75:
-        rsi_pts += 1.5
-
-    hh20 = float(df["High"].iloc[-21:-1].max()) if len(df) >= 21 else float(df["High"].max())
-    breakout = 3.0 if price > hh20 else 0.0
-
-    score = trend + rsi_pts + breakout
-    info = {"price": price, "ema20": e20v, "ema50": e50v, "rsi": rv, "breakout": breakout > 0, "score": score}
-    return float(score), info
-
-
-# =============================
-# Data fetch
-# =============================
-@st.cache_data(show_spinner=False, ttl=60 * 10)
-def fetch_history(symbol: str, period: str) -> pd.DataFrame:
-    if yf is None:
-        return pd.DataFrame()
-    df = yf.download(symbol, period=period, interval="1d", auto_adjust=False, progress=False, threads=False)
+# =========================
+# Data
+# =========================
+@st.cache_data(ttl=600)
+def download_symbol(symbol: str, period: str):
+    df = yf.download(symbol, period=period, progress=False, auto_adjust=False, threads=True)
     if df is None or df.empty:
-        return pd.DataFrame()
-    return df.dropna()
+        return None
 
+    # Normalize yfinance MultiIndex columns if it happens
+    if isinstance(df.columns, pd.MultiIndex):
+        lvl1 = df.columns.get_level_values(1)
+        if symbol in set(lvl1):
+            df = df.xs(symbol, axis=1, level=1, drop_level=True)
+        else:
+            first_ticker = list(dict.fromkeys(lvl1))[0]
+            df = df.xs(first_ticker, axis=1, level=1, drop_level=True)
 
-@st.cache_data(show_spinner=False, ttl=60 * 10)
-def fetch_history_batch(symbols: list[str], period: str) -> dict[str, pd.DataFrame]:
-    """
-    تحميل دفعة وحدة عشان ما يصير Too many open files
-    يرجع dict: symbol -> df
-    """
-    if yf is None or not symbols:
-        return {}
-    tickers = " ".join(symbols)
-    raw = yf.download(
-        tickers=tickers,
-        period=period,
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-    )
-    out: dict[str, pd.DataFrame] = {}
+    df = df.dropna()
+    return None if df.empty else df
 
-    if raw is None or raw.empty:
-        return out
+def compute_trend(last_close, ma20, ma50):
+    if last_close > ma20 and last_close > ma50:
+        return "صاعد"
+    if last_close < ma20 and last_close < ma50:
+        return "هابط"
+    return "متذبذب"
 
-    # حالة سهم واحد: أعمدة عادية
-    if not isinstance(raw.columns, pd.MultiIndex):
-        df = raw.dropna()
-        # ما نعرف الرمز الحقيقي من raw هنا، نستخدم أول رمز
-        out[symbols[0]] = df
-        return out
+def score_stock(last_close, ma20, ma50, rsi, vol, vol_ma20, mode: str):
+    score = 0.0
 
-    # حالة عدة أسهم: MultiIndex (ticker, field)
-    for s in symbols:
-        if s not in raw.columns.get_level_values(0):
-            continue
-        df = raw[s].dropna()
-        if df is not None and not df.empty:
-            out[s] = df
-    return out
+    # Trend (40)
+    if last_close > ma20 and ma20 > ma50:
+        score += 40
+    elif last_close > ma20:
+        score += 25
+    elif last_close > ma50:
+        score += 15
+    else:
+        score += 5
 
+    # RSI (30)
+    if mode == "Swing":
+        if 45 <= rsi <= 65:
+            score += 30
+        elif 35 <= rsi < 45 or 65 < rsi <= 72:
+            score += 18
+        elif rsi > 72:
+            score += 6
+        else:
+            score += 10
+    else:  # DayTrade
+        if 35 <= rsi <= 60:
+            score += 30
+        elif 25 <= rsi < 35 or 60 < rsi <= 70:
+            score += 18
+        elif rsi > 70:
+            score += 8
+        else:
+            score += 12
 
-def fmt_price(x: float) -> str:
-    if x is None or (isinstance(x, float) and math.isnan(x)):
-        return "—"
-    return f"{x:,.2f}"
+    # Volume (20)
+    if np.isnan(vol_ma20) or vol_ma20 == 0:
+        score += 8
+    else:
+        ratio = vol / vol_ma20
+        if ratio >= 1.5:
+            score += 20
+        elif ratio >= 1.2:
+            score += 16
+        elif ratio >= 1.0:
+            score += 12
+        elif ratio >= 0.8:
+            score += 8
+        else:
+            score += 4
 
+    # Setup boost (10)
+    if last_close > ma20 and rsi < 70:
+        score += 10
+    elif rsi < 35:
+        score += 6
+    else:
+        score += 3
 
-# =============================
-# UI
-# =============================
-st.set_page_config(page_title="Trading App (Clean)", layout="wide")
+    return max(0, min(100, round(score, 1)))
 
-st.title("📌 الأسواق")
-st.caption("اختر السوق ثم السهم، ويطلع التحليل والخطة.")
+def recommendation_from_score(score: float, trend: str, rsi: float):
+    if score >= 75 and trend == "صاعد" and rsi < 72:
+        return "BUY ✅"
+    if score >= 60:
+        return "WATCH 👀"
+    return "WAIT ⏳"
 
-c1, c2 = st.columns([1, 9])
-with c1:
-    if st.button("🔄 تحديث"):
-        st.cache_data.clear()
-        for k in list(st.session_state.keys()):
-            if k.startswith("sel_") or k.startswith("q_") or k.startswith("best_"):
-                del st.session_state[k]
-        st.rerun()
+def build_trade_plan(df: pd.DataFrame, mode: str):
+    last_close = safe_float(df["Close"].iloc[-1])
+    atr = calc_atr(df, 14)
+    last_atr = safe_float(atr.iloc[-1])
 
-left, right = st.columns([1.05, 1.95], gap="large")
+    stop_mult = 1.0 if mode == "DayTrade" else 1.8
+    if np.isnan(last_atr) or last_atr == 0:
+        stop_pct = 0.03 if mode == "DayTrade" else 0.06
+        stop = last_close * (1 - stop_pct)
+    else:
+        stop = last_close - (stop_mult * last_atr)
 
-with left:
-    st.subheader("🧰 القوائم")
-    box_us = st.container(border=True)
-    box_sa = st.container(border=True)
+    risk = last_close - stop
+    if risk <= 0:
+        return None
 
-    st.markdown("---")
-    period = st.selectbox("اختر المدة", ["1mo", "3mo", "6mo", "1y", "2y"], index=2, key="sel_period")
+    return {
+        "Entry": round(last_close, 2),
+        "Stop": round(stop, 2),
+        "Risk (R)": round(risk, 2),
+        "Target 1 (1R)": round(last_close + 1 * risk, 2),
+        "Target 2 (2R)": round(last_close + 2 * risk, 2),
+        "Target 3 (3R)": round(last_close + 3 * risk, 2),
+    }
 
-    us_all = load_universe("US")
-    sa_all = load_universe("SA")
-
-    with box_us:
-        st.markdown("### 🇺🇸 السوق الأمريكي (ناسداك)")
-        if not us_all:
-            st.warning("جهّز: data/universe/us_symbols.txt")
-        q_us = st.text_input("بحث سريع", value=st.session_state.get("q_us", ""), key="q_us")
-        us_filtered = [s for s in us_all if q_us.strip().upper() in s] if q_us.strip() else us_all
-        page_size_us = st.selectbox("عدد الأسهم المعروضة هنا", [50, 100, 200, 500], index=1, key="sel_us_page")
-        us_show = us_filtered[:page_size_us]
-        st.selectbox("اختر سهم أمريكي", us_show if us_show else ["—"], index=0, key="sel_us_symbol")
-
-    with box_sa:
-        st.markdown("### 🇸🇦 السوق السعودي (تاسي)")
-        if not sa_all:
-            st.warning("جهّز: data/universe/sa_symbols.txt (مثل 1180.SR)")
-        q_sa = st.text_input("بحث سريع", value=st.session_state.get("q_sa", ""), key="q_sa")
-        qv = q_sa.strip().upper()
-        sa_filtered = [s for s in sa_all if qv in s] if qv else sa_all
-        page_size_sa = st.selectbox("عدد الأسهم المعروضة هنا", [50, 100, 200, 500], index=1, key="sel_sa_page")
-        sa_show = sa_filtered[:page_size_sa]
-        st.selectbox("اختر سهم سعودي", sa_show if sa_show else ["—"], index=0, key="sel_sa_symbol")
-
-    st.markdown("---")
-    active_market = st.radio(
-        "السوق المعتمد للتحليل",
-        ["US", "SA"],
-        format_func=lambda x: "🇺🇸 أمريكي" if x == "US" else "🇸🇦 سعودي",
-        horizontal=True,
-        key="sel_market",
-    )
-
-    chosen_symbol = st.session_state.get("sel_us_symbol", "—") if active_market == "US" else st.session_state.get("sel_sa_symbol", "—")
-    st.caption(f"السهم المختار الآن: *{chosen_symbol}*")
-
-with right:
-    st.subheader("📊 التحليل")
-
-    symbol = chosen_symbol
-    if symbol in (None, "", "—"):
-        st.info("اختر سهم من القائمة يسار.")
-        st.stop()
-
-    if yf is None:
-        st.error("ثبّت yfinance: pip install yfinance")
-        st.stop()
-
-    df = fetch_history(symbol, period)
-    if df.empty:
-        st.error(f"ما قدرت أجيب بيانات للسهم: {symbol}")
-        st.stop()
+def analyze_symbol(symbol: str, period: str, mode: str):
+    df = download_symbol(symbol, period)
+    if df is None:
+        return None
 
     close = df["Close"]
-    e20 = ema(close, 20)
-    e50 = ema(close, 50)
-    r = rsi(close, 14)
-    a = atr(df, 14)
+    vol = df["Volume"]
 
-    last = df.iloc[-1]
-    price = float(last["Close"])
-    rsi_v = float(r.iloc[-1])
-    atr_v = float(a.iloc[-1])
+    ma20 = close.rolling(20).mean()
+    ma50 = close.rolling(50).mean()
+    rsi = calc_rsi(close, 14)
+    vol_ma20 = vol.rolling(20).mean()
 
-    reasons = []
-    ok = True
+    last_close = safe_float(close.iloc[-1])
+    last_ma20 = safe_float(ma20.iloc[-1])
+    last_ma50 = safe_float(ma50.iloc[-1])
+    last_rsi = safe_float(rsi.iloc[-1])
+    last_vol = safe_float(vol.iloc[-1])
+    last_vol_ma20 = safe_float(vol_ma20.iloc[-1])
 
-    if price < float(e20.iloc[-1]):
-        ok = False
-        reasons.append("السعر تحت EMA20 (ضعف قصير المدى).")
-    if float(e20.iloc[-1]) < float(e50.iloc[-1]):
-        ok = False
-        reasons.append("EMA20 تحت EMA50 (الاتجاه غير مؤكد).")
-    if rsi_v < 40:
-        ok = False
-        reasons.append(f"RSI منخفض ({rsi_v:.1f}) — ضعف.")
-    if rsi_v > 75:
-        ok = False
-        reasons.append(f"RSI عالي ({rsi_v:.1f}) — تشبع شراء.")
+    trend = compute_trend(last_close, last_ma20, last_ma50)
+    score = score_stock(last_close, last_ma20, last_ma50, last_rsi, last_vol, last_vol_ma20, mode)
+    rec = recommendation_from_score(score, trend, last_rsi)
+    plan = build_trade_plan(df, mode)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("السعر الحالي", fmt_price(price))
-    m2.metric("الاتجاه", "صاعد" if (price > float(e20.iloc[-1]) and float(e20.iloc[-1]) > float(e50.iloc[-1])) else "متذبذب")
-    m3.metric("RSI", f"{rsi_v:.1f}")
-    m4.metric("ATR", f"{atr_v:.2f}")
+    out = {
+        "Symbol": symbol,
+        "Score": score,
+        "Recommendation": rec,
+        "Trend": trend,
+        "Last Close": round(last_close, 2),
+        "MA20": round(last_ma20, 2),
+        "MA50": round(last_ma50, 2),
+        "RSI": round(last_rsi, 2),
+        "Vol/Avg20": round((last_vol / last_vol_ma20), 2) if (not np.isnan(last_vol_ma20) and last_vol_ma20 != 0) else np.nan,
+    }
+    if plan:
+        out.update(plan)
 
-    if ok:
-        st.success("✅ مناسب مبدئيًا للدخول حسب القواعد الحالية.")
+    return out, df, plan
+
+# =========================
+# UI State
+# =========================
+if "market" not in st.session_state:
+    st.session_state.market = None
+if "chosen_symbol" not in st.session_state:
+    st.session_state.chosen_symbol = None
+
+# =========================
+# UI Header
+# =========================
+st.title("Trading App")
+st.subheader("الأسواق")
+
+c1, c2 = st.columns(2)
+with c1:
+    if st.button("🇺🇸 السوق الأمريكي", use_container_width=True, key="market_us"):
+        st.session_state.market = "US"
+with c2:
+    if st.button("🇸🇦 السوق السعودي", use_container_width=True, key="market_sa"):
+        st.session_state.market = "SA"
+
+st.markdown("---")
+
+# =========================
+# Market list (Auto analysis on selection)
+# =========================
+if st.session_state.market is None:
+    st.info("اختر سوق عشان تظهر قائمة الأسهم.")
+else:
+    period = st.selectbox("المدة", ["3mo", "6mo", "1y", "2y"], index=1)
+    mode = st.selectbox("نوع التحليل", ["DayTrade", "Swing"], index=1,
+                        format_func=lambda x: "مضاربة" if x == "DayTrade" else "سوينق")
+
+    if st.session_state.market == "US":
+        st.markdown("### 🇺🇸 السوق الأمريكي")
+        pick = st.radio("اختر سهم", US_DEFAULT, key="pick_us", label_visibility="collapsed")
     else:
-        st.warning("⚠️ غير مناسب مبدئيًا حسب القواعد الحالية (ويحتاج تأكيد).")
+        st.markdown("### 🇸🇦 السوق السعودي")
+        pick = st.radio("اختر سهم", SA_DEFAULT, key="pick_sa", label_visibility="collapsed")
 
-    if reasons:
-        st.markdown("*الأسباب:*")
-        for x in reasons:
-            st.write(f"• {x}")
-
-    st.markdown("### 🎯 خطة الدخول (مقترحة)")
-    plan = build_plan(price, atr_v)
-
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("دخول (Entry)", fmt_price(plan.entry))
-    p2.metric("وقف (Stop)", fmt_price(plan.stop))
-    p3.metric("مخاطرة/سهم", fmt_price(plan.entry - plan.stop))
-    p4.metric("الوضع", plan.risk_label)
-
-    t1, t2, t3 = st.columns(3)
-    t1.metric("هدف 1 (R1)", fmt_price(plan.targets[0]))
-    t2.metric("هدف 2 (R2)", fmt_price(plan.targets[1]))
-    t3.metric("هدف 3 (R3)", fmt_price(plan.targets[2]))
-
-    st.caption(f"الخطة مبنية على ATR (14 يوم) — RR تقريبي: {plan.rr:.2f}")
+    # ✅ هذا هو الربط: مجرد الاختيار = يتحدث السهم + تحليل تلقائي
+    st.session_state.chosen_symbol = pick
 
     st.markdown("---")
-    show_last = st.checkbox("📌 عرض آخر الأسعار (مختصر)", value=st.session_state.get("show_last", False), key="show_last")
-    if show_last:
-        tail = df.tail(12).copy()
-        tail = tail.reset_index().rename(columns={"Date": "التاريخ"})
-        tail = tail[["التاريخ", "Open", "High", "Low", "Close", "Volume"]]
-        st.dataframe(tail, width="stretch")
+    st.success(f"✅ السهم المختار الآن: {st.session_state.chosen_symbol}")
 
+    res = analyze_symbol(st.session_state.chosen_symbol, period=period, mode=mode)
+    if not res:
+        st.error("ما قدرت أجيب بيانات. تأكد من الرمز أو جرّب مدة ثانية.")
+    else:
+        out, df, plan = res
 
-# =============================
-# Best Opportunities (Batch fix)
-# =============================
-st.markdown("---")
-st.subheader("🏆 أفضل الفرص (اختياري)")
+        st.subheader(f"{out['Symbol']} — {out['Recommendation']} (Score: {out['Score']})")
 
-bwrap = st.container(border=True)
-with bwrap:
-    best_market = st.selectbox("اختر السوق للفحص", ["SA", "US"], index=0, key="best_market",
-                              format_func=lambda x: "🇸🇦 تاسي" if x == "SA" else "🇺🇸 ناسداك")
-    show_top = st.selectbox("اعرض الأفضل", [5, 10, 20, 50], index=1, key="best_top")
-    scan_n = st.selectbox("كم سهم نفحص من القائمة؟", [50, 100, 200, 500], index=1, key="best_scan")
-    run = st.button("🚀 افحص أفضل الفرص", key="best_run")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Trend", out["Trend"])
+        m2.metric("RSI", out["RSI"])
+        m3.metric("Close", out["Last Close"])
+        m4.metric("Vol/Avg20", out["Vol/Avg20"])
 
-    if run:
-        all_syms = load_universe(best_market)
-        if not all_syms:
-            st.error("القائمة فاضية — جهّز ملفات السوق أول.")
+        st.markdown("### 🎯 دخول / وقف / أهداف")
+        if plan:
+            p1, p2, p3, p4, p5, p6 = st.columns(6)
+            p1.metric("Entry", out["Entry"])
+            p2.metric("Stop", out["Stop"])
+            p3.metric("1R", out["Target 1 (1R)"])
+            p4.metric("2R", out["Target 2 (2R)"])
+            p5.metric("3R", out["Target 3 (3R)"])
+            p6.metric("Risk", out["Risk (R)"])
         else:
-            syms = all_syms[: int(scan_n)]
+            st.warning("ما قدرت أبني خطة (بيانات ATR غير كافية).")
 
-            st.info("جالس أحمل البيانات دفعة وحدة…")
-            prog = st.progress(0)
-
-            # تحميل Batch واحد
-            data_map = fetch_history_batch(syms, st.session_state["sel_period"])
-            prog.progress(0.5)
-
-            rows = []
-            for i, s in enumerate(syms, start=1):
-                d = data_map.get(s)
-                if d is None or d.empty or len(d) < 60:
-                    continue
-                sc, info = score_opportunity(d)
-                rows.append({
-                    "الرمز": s,
-                    "Score": round(sc, 2),
-                    "الاتجاه": "صاعد" if (info["price"] > info["ema20"] and info["ema20"] > info["ema50"]) else "متذبذب",
-                    "RSI": round(info["rsi"], 1),
-                    "Breakout": "✅" if info["breakout"] else "—",
-                    "السعر": round(info["price"], 2),
-                })
-            prog.progress(1.0)
-
-            if not rows:
-                st.warning("ما طلعت نتائج كفاية (جرّب زود scan أو غيّر المدة).")
-            else:
-                out = pd.DataFrame(rows).sort_values("Score", ascending=False).reset_index(drop=True)
-                st.success(f"تم ترتيب {len(out)} سهم ✅")
-                st.dataframe(out.head(int(show_top)), width="stretch")
-                st.caption("الترتيب يعتمد على: Trend + RSI + Breakout (مبدئي فقط).")
+        st.markdown("### 📊 الشارت")
+        st.line_chart(df["Close"])
