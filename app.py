@@ -100,6 +100,38 @@ def fmt_symbol(sym: str, market: str) -> str:
             return f"{sym}.SR"
     return sym
 
+def make_plan(price: float, atr: float, style: str):
+    # مضاربة: وقف أقرب / سوينق: أوسع / محافظ: أوسع + أهداف أقل عدوانية
+    if style == "مضاربة":
+        stop_mult = 1.5
+        t1, t2, t3 = 1.5, 2.5, 3.5
+    elif style == "سوينق":
+        stop_mult = 2.5
+        t1, t2, t3 = 2.0, 3.5, 5.0
+    elif style == "متوازن":
+        stop_mult = 2.0
+        t1, t2, t3 = 1.8, 3.0, 4.2
+    else:  # محافظ
+        stop_mult = 2.8
+        t1, t2, t3 = 1.3, 2.2, 3.2
+
+    entry = price
+    stop = price - (stop_mult * atr)
+    r1 = price + (t1 * atr)
+    r2 = price + (t2 * atr)
+    r3 = price + (t3 * atr)
+    return entry, stop, r1, r2, r3
+
+def opportunity_classify(scores: pd.Series):
+    q1 = scores.quantile(0.7)
+    q0 = scores.quantile(0.4)
+
+    def cls(s):
+        if s >= q1: return "قوي"
+        if s >= q0: return "متوسط"
+        return "ضعيف"
+    return cls, q1, q0
+
 # -----------------------
 # State
 # -----------------------
@@ -109,6 +141,9 @@ if "active_market" not in st.session_state:
 # الافتراضي: مضاربة
 if "style" not in st.session_state:
     st.session_state.style = "مضاربة"
+
+if "rank_df" not in st.session_state:
+    st.session_state.rank_df = None
 
 US_SYMBOLS = load_symbols(US_PATH)
 SA_SYMBOLS = load_symbols(SA_PATH)
@@ -123,10 +158,12 @@ c1, c2 = st.columns(2)
 with c1:
     if st.button("🇺🇸 السوق الأمريكي", use_container_width=True):
         st.session_state.active_market = "US"
+        st.session_state.rank_df = None
         st.rerun()
 with c2:
     if st.button("🇸🇦 السوق السعودي", use_container_width=True):
         st.session_state.active_market = "SA"
+        st.session_state.rank_df = None
         st.rerun()
 
 st.divider()
@@ -136,7 +173,7 @@ if active is None:
     st.info("اختر سوق من الأعلى.")
     st.stop()
 
-# اختيار الأسلوب (الافتراضي مضاربة)
+# اختيار الأسلوب
 style = st.selectbox("أسلوب التداول", ["مضاربة", "سوينق", "متوازن", "محافظ"], index=0)
 st.session_state.style = style
 
@@ -171,36 +208,24 @@ if st.button("🔍 تحليل وترتيب جميع الأسهم"):
 
             # Scoring حسب الأسلوب
             score = 0.0
-
             if style == "مضاربة":
-                if 20 <= rsi <= 40:
-                    score += 3
-                if trend == "صاعد":
-                    score += 2
+                if 20 <= rsi <= 40: score += 3
+                if trend == "صاعد": score += 2
                 score += ret_20 / 15.0
                 score -= risk
-
             elif style == "سوينق":
-                if trend == "صاعد":
-                    score += 3
-                if 40 <= rsi <= 60:
-                    score += 2
+                if trend == "صاعد": score += 3
+                if 40 <= rsi <= 60: score += 2
                 score += ret_20 / 10.0
                 score -= risk / 2
-
             elif style == "متوازن":
-                if trend == "صاعد":
-                    score += 2
-                if 35 <= rsi <= 65:
-                    score += 2
+                if trend == "صاعد": score += 2
+                if 35 <= rsi <= 65: score += 2
                 score += ret_20 / 12.0
                 score -= risk / 1.5
-
             else:  # محافظ
-                if trend == "صاعد":
-                    score += 2
-                if risk < 3:
-                    score += 2
+                if trend == "صاعد": score += 2
+                if risk < 3: score += 2
                 score += ret_20 / 20.0
                 score -= risk
 
@@ -217,29 +242,85 @@ if st.button("🔍 تحليل وترتيب جميع الأسهم"):
 
     if not rows:
         st.warning("ما قدرنا نطلع نتائج.")
-        st.stop()
+        st.session_state.rank_df = None
+    else:
+        df_rank = pd.DataFrame(rows).sort_values("Score", ascending=False).reset_index(drop=True)
 
-    df_rank = pd.DataFrame(rows).sort_values("Score", ascending=False).reset_index(drop=True)
+        cls_fn, _, _ = opportunity_classify(df_rank["Score"])
+        df_rank["Opportunity"] = df_rank["Score"].apply(cls_fn)
+        df_rank.insert(0, "Flag", df_rank["Opportunity"].map({
+            "قوي": "🟩 قوي",
+            "متوسط": "🟨 متوسط",
+            "ضعيف": "⬜️ ضعيف"
+        }))
 
-    # تصنيف الفرص
-    q1 = df_rank["Score"].quantile(0.7)
-    q0 = df_rank["Score"].quantile(0.4)
+        st.session_state.rank_df = df_rank
 
-    def classify(s):
-        if s >= q1:
-            return "قوي"
-        if s >= q0:
-            return "متوسط"
-        return "ضعيف"
+# عرض النتائج إذا موجودة
+rank_df = st.session_state.rank_df
+if rank_df is None:
+    st.info("اضغط زر 🔍 تحليل وترتيب جميع الأسهم لعرض النتائج.")
+    st.stop()
 
-    df_rank["Opportunity"] = df_rank["Score"].apply(classify)
-    df_rank.insert(0, "Flag", df_rank["Opportunity"].map({
-        "قوي": "🟩 قوي",
-        "متوسط": "🟨 متوسط",
-        "ضعيف": "⬜️ ضعيف"
-    }))
+st.success("✅ تم ترتيب الأسهم حسب أفضل الفرص")
+st.caption("🟩 قوي = فرص أفضل حسب الأسلوب المختار")
+st.dataframe(rank_df, use_container_width=True)
 
-    st.success("✅ تم ترتيب الأسهم حسب أفضل الفرص")
-    st.caption("🟩 قوي = فرص أفضل حسب الأسلوب المختار")
+# -----------------------
+# أفضل 3 فرص + تحليلهم
+# -----------------------
+st.divider()
+st.markdown("## ⭐ أفضل 3 فرص اليوم")
 
-    st.dataframe(df_rank, use_container_width=True)
+best = rank_df[rank_df["Opportunity"] == "قوي"].head(3)
+if best.empty:
+    best = rank_df.head(3)
+
+chips = []
+for i, r in best.iterrows():
+    chips.append(f"*{r['Symbol']}* ({r['Flag']})")
+
+st.write(" • ".join(chips))
+
+for idx, row in best.iterrows():
+    sym = row["Symbol"]
+    with st.expander(f"📌 {sym} — {row['Flag']} (Score: {row['Score']})", expanded=True):
+        df = fetch_history(sym)
+        if df.empty or len(df) < 60:
+            st.warning("ما قدرنا نجلب بيانات كافية لهذا السهم.")
+            continue
+
+        df["RSI"] = calc_rsi(df["Close"])
+        df["ATR"] = calc_atr(df)
+
+        price = float(df["Close"].iloc[-1])
+        rsi = float(df["RSI"].iloc[-1])
+        atr = float(df["ATR"].iloc[-1])
+        trend = trend_label(df)
+
+        entry, stop, r1, r2, r3 = make_plan(price, atr, style)
+
+        note = "✅ فرصة قوية حسب الأسلوب."
+        if rsi >= 70:
+            note = "⚠️ RSI مرتفع (تشبع شراء) — انتبه من الدخول المتأخر."
+        elif rsi <= 30:
+            note = "✅ RSI منخفض (تشبع بيع) — ممكن ارتداد."
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("السعر", f"{price:.2f}")
+        m2.metric("الاتجاه", trend)
+        m3.metric("RSI", f"{rsi:.1f}")
+        m4.metric("ATR", f"{atr:.2f}")
+
+        st.success(note)
+
+        st.markdown("### 🎯 خطة الدخول")
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("دخول", f"{entry:.2f}")
+        p2.metric("وقف", f"{stop:.2f}")
+        p3.metric("هدف 1", f"{r1:.2f}")
+        p4.metric("هدف 2", f"{r2:.2f}")
+        p5.metric("هدف 3", f"{r3:.2f}")
+
+        with st.expander("عرض آخر 30 يوم"):
+            st.dataframe(df.tail(30), use_container_width=True)
