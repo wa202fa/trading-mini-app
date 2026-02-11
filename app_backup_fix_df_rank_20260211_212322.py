@@ -352,28 +352,6 @@ logging.getLogger('requests').setLevel(logging.CRITICAL)
 # -----------------------
 st.set_page_config(page_title="Trading App", page_icon="📈", layout="wide")
 
-# === NAV_BLOCK_START (mobile-first pages) ===
-import streamlit as st
-
-# تنقل بسيط (مناسب للجوال)
-page = st.sidebar.radio('التنقل', ['🏠 الرئيسية', '📊 السوق', '📈 سهم'], index=1)
-
-if page != '📊 السوق':
-    if page == '🏠 الرئيسية':
-        st.title('🏠 الصفحة الرئيسية')
-        st.caption('أفضل 3 فرص + دخول سريع (بنفعّلها بالكامل بعد شوي)')
-        st.info('اذهب لصفحة السوق واضغط تحليل، وبعدها نعرض هنا أفضل 3 فرص تلقائيًا.')
-        st.page_link('app.py', label='➡️ افتح صفحة السوق', icon='📊') if hasattr(st, 'page_link') else None
-        st.stop()
-
-    if page == '📈 سهم':
-        st.title('📈 صفحة السهم')
-        st.caption('قريبًا: دخول / وقف / أهداف + أسباب قصيرة')
-        st.info('بنخليها صفحة نظيفة جدًا للجوال.')
-        st.stop()
-# === NAV_BLOCK_END ===
-
-
 BASE = Path.cwd()
 US_PATH = BASE / "data" / "universe" / "us_symbols.txt"
 SA_PATH = BASE / "data" / "universe" / "sa_symbols.txt"
@@ -610,16 +588,5 @@ except Exception:
 render_opportunity_cards(_df_for_cards, top_n=25, title="ترتيب الفرص")
 
 with st.expander("عرض الجدول الكامل (اختياري)"):
-    pass
-    # --- Safe render for ranked results ---
-try:
-    _df_safe = df_rank
-except Exception:
-    _df_safe = None
+    st.dataframe(df_rank, use_container_width=True)
 
-if _df_safe is None or (hasattr(_df_safe, "empty") and _df_safe.empty):
-    st.info("ℹ️ ما فيه بيانات لعرضها حالياً.")
-else:
-    render_opportunity_cards(_df_safe, top_n=25, title="ترتيب الفرص")
-    with st.expander("عرض الجدول الكامل (اختياري)"):
-        st.dataframe(_df_safe, use_container_width=True)
